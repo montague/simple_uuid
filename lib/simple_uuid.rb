@@ -1,15 +1,18 @@
+require 'macaddr'
+
 class Time
   def self.stamp
     Time.now.stamp
   end
-  
+
   def stamp
     to_i * 1_000_000 + usec
   end
 end
 
 module SimpleUUID
-  # UUID format version 1, as specified in RFC 4122, with jitter in place of the mac address and sequence counter.
+  # UUID format version 1, as specified in RFC 4122
+  # mac_address has been hacked into this method in an attempt to increase entropy
   class UUID
     include Comparable
 
@@ -55,7 +58,8 @@ module SimpleUUID
           # Top 3 bytes reserved
           rand(2**13) | VARIANT,
           rand(2**16),
-          rand(2**32)
+          mac_address # attempt at fixing guid collision bug...
+          #rand(2**32)
         ].pack("NnnnnN")
 
       else
@@ -66,9 +70,9 @@ module SimpleUUID
     def to_i
       ints = @bytes.unpack("NNNN")
       (ints[0] << 96) +
-      (ints[1] << 64) +
-      (ints[2] << 32) +
-      ints[3]
+        (ints[1] << 64) +
+        (ints[2] << 32) +
+        ints[3]
     end
 
     def version
@@ -132,20 +136,67 @@ module SimpleUUID
       usecs = total_usecs(bytes)
       Time.at(usecs / 1_000_000, usecs % 1_000_000)
     end
-    
+
     # Return a time object
     def to_time
       Time.at(total_usecs / 1_000_000, total_usecs % 1_000_000)
     end
-    
+
     # Given raw bytes, return the total_usecs
     def self.total_usecs(bytes)
       elements = bytes.unpack("Nnn")
       (elements[0] + (elements[1] << 32) + ((elements[2] & 0x0FFF) << 48) - GREGORIAN_EPOCH_OFFSET) / 10
     end
+    ##
+    # Generate a pseudo MAC address because we have no pure-ruby way
+    # to know  the MAC  address of the  NIC this system  uses.  Note
+    # that cheating  with pseudo arresses here  is completely legal:
+    # see Section 4.5 of RFC4122 for details.
+    #
+    # This implementation is shamelessly stolen from
+    #  https://github.com/spectra/ruby-uuid/blob/master/uuid.rb
+    # Thanks spectra.
+    #
+    def pseudo_mac_address
+      sha1 = ::Digest::SHA1.new
+      256.times do
+        r = [rand(0x100000000)].pack "N"
+        sha1.update r
+      end
+      str = sha1.digest
+      r = rand 14 # 20-6
+      node = str[r, 6] || str
+      if RUBY_VERSION >= "1.9.0"
+        nnode = node.bytes.to_a
+        nnode[0] |= 0x01
+        node = ''
+        nnode.each { |s| node << s.chr }
+      else
+        node[0] |= 0x01 # multicast bit
+      end
+      node.bytes.collect{|b|b.to_s(16)}.join.hex & 0x7FFFFFFFFFFF
+    end
 
+    ##
+    # Uses system calls to get a mac address
+    #
+    def iee_mac_address
+      begin
+        Mac.addr.gsub(/:|-/, '').hex & 0x7FFFFFFFFFFF
+      rescue
+        0
+      end
+    end
+
+    ##
+    # return iee_mac_address if available, pseudo_mac_address otherwise
+    #
+    def mac_address
+      return iee_mac_address unless iee_mac_address == 0
+      return pseudo_mac_address
+    end
     private
-    
+
     def total_usecs
       @total_usecs ||= self.class.total_usecs(@bytes)
     end
